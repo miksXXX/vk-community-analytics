@@ -10,26 +10,6 @@ import os
 # -----------------------------------
 st.set_page_config(page_title="Аналитика VK", layout="wide", page_icon="📊")
 
-st.markdown("""
-    <style>
-        .metric-card {
-            background: white;
-            border-radius: 20px;
-            padding: 1rem;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-        }
-        .metric-value {
-            font-size: 2rem;
-            font-weight: 700;
-            color: #0B1C3A;
-        }
-        .metric-label {
-            font-size: 0.85rem;
-            color: #5A6E8A;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
 # -----------------------------------
 # ПОДКЛЮЧЕНИЕ К VK
 # -----------------------------------
@@ -38,10 +18,12 @@ VK_GROUP_ID = os.getenv("VK_GROUP_ID")
 
 st.title("📊 Аналитика сообщества VK")
 
+# Проверка переменных
 if not VK_ACCESS_TOKEN or not VK_GROUP_ID:
-    st.error("❌ Переменные окружения не найдены")
+    st.error("❌ Переменные окружения VK_ACCESS_TOKEN и VK_GROUP_ID не найдены")
     st.stop()
 
+# Функция загрузки постов
 def load_posts():
     url = "https://api.vk.com/method/wall.get"
     params = {
@@ -50,43 +32,79 @@ def load_posts():
         "owner_id": f"-{VK_GROUP_ID}",
         "count": 30
     }
-    resp = requests.post(url, params=params).json()
     
-    if "error" in resp:
-        st.error(f"Ошибка: {resp['error']['error_msg']}")
+    try:
+        response = requests.post(url, params=params)
+        data = response.json()
+        
+        if "error" in data:
+            st.error(f"Ошибка VK API: {data['error']['error_msg']}")
+            return None
+        
+        items = data.get("response", {}).get("items", [])
+        
+        for post in items:
+            views = post.get("views", {}).get("count", 1)
+            likes = post.get("likes", {}).get("count", 0)
+            reposts = post.get("reposts", {}).get("count", 0)
+            comments = post.get("comments", {}).get("count", 0)
+            
+            post["er"] = round(((likes + reposts + comments) / views) * 100, 2)
+            post["views_cnt"] = views
+            post["likes_cnt"] = likes
+            post["reposts_cnt"] = reposts
+            post["comments_cnt"] = comments
+        
+        return items
+    except Exception as e:
+        st.error(f"Ошибка подключения: {e}")
         return None
-    
-    items = resp.get("response", {}).get("items", [])
-    for p in items:
-        views = p.get("views", {}).get("count", 1)
-        likes = p.get("likes", {}).get("count", 0)
-        reposts = p.get("reposts", {}).get("count", 0)
-        comments = p.get("comments", {}).get("count", 0)
-        p["er"] = round((likes + reposts + comments) / views * 100, 2)
-        p["views_cnt"] = views
-        p["likes_cnt"] = likes
-    return items
 
-if st.button("📥 Загрузить данные"):
-    with st.spinner("Загрузка..."):
+# Кнопка загрузки
+if st.button("📥 Загрузить данные", use_container_width=True):
+    with st.spinner("Загружаем данные из VK..."):
         posts = load_posts()
     if posts:
         st.session_state.posts = posts
-        st.success(f"Загружено {len(posts)} постов")
+        st.success(f"✅ Загружено {len(posts)} постов")
+    else:
+        st.error("Не удалось загрузить посты")
 
-if "posts" in st.session_state:
+# Отображение данных
+if "posts" in st.session_state and st.session_state.posts:
     posts = st.session_state.posts
     df = pd.DataFrame(posts)
     
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Всего постов", len(posts))
-    c2.metric("Средний ER", f"{df['er'].mean():.2f}%")
-    c3.metric("Всего просмотров", f"{df['views_cnt'].sum():,}")
+    # Метрики
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("📄 Всего постов", len(posts))
+    col2.metric("📈 Средний ER", f"{df['er'].mean():.2f}%")
+    col3.metric("👁️ Всего просмотров", f"{df['views_cnt'].sum():,}")
+    col4.metric("❤️ Всего лайков", f"{df['likes_cnt'].sum():,}")
     
-    st.subheader("Топ-5 постов")
-    for _, row in df.nlargest(5, "er").iterrows():
-        date = datetime.fromtimestamp(row["date"]).strftime("%d.%m.%Y")
-        text = row.get("text", "")[:80]
-        st.markdown(f"**{date}** — ER {row['er']}% | ❤️ {row['likes_cnt']}")
-        st.caption(text)
-        st.markdown("---")
+    # График по дням
+    st.subheader("📅 Динамика ER по дням")
+    df["date"] = pd.to_datetime(df["date"], unit="s").dt.date
+    daily = df.groupby("date")["er"].mean().reset_index()
+    
+    fig = px.line(daily, x="date", y="er", markers=True, 
+                  labels={"date": "Дата", "er": "ER (%)"},
+                  title="Средний ER по дням")
+    fig.update_layout(plot_bgcolor="white", height=400)
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Топ постов
+    st.subheader("🏆 Топ-5 постов по вовлечённости")
+    for i, (_, row) in enumerate(df.nlargest(5, "er").iterrows(), 1):
+        date = datetime.fromtimestamp(row["date"].timestamp()).strftime("%d.%m.%Y")
+        text = (row.get("text", "") or "(без текста)")[:100]
+        
+        with st.container():
+            st.markdown(f"""
+            **{i}. {date}** — ER: `{row['er']}%`  
+            *{text}*  
+            👁️ {row['views_cnt']} | ❤️ {row['likes_cnt']} | 🔁 {row['reposts_cnt']} | 💬 {row['comments_cnt']}
+            """)
+            st.divider()
+else:
+    st.info("👆 Нажмите кнопку «Загрузить данные», чтобы начать")
